@@ -389,8 +389,19 @@ func TestWaitRefusesAReplacedTunnel(t *testing.T) {
 
 // TestCompleteRequiresSessionUID checks that Complete refuses an exposure without a session UID.
 func TestCompleteRequiresSessionUID(t *testing.T) {
-	err := Complete(context.Background(), newClient(false), &Exposure{Namespace: "agents", SessionName: "s1"})
-	if err == nil {
-		t.Fatal("expected an error")
+	c := newClient(false)
+	session := newObject(SessionGVK, "agents", "s1")
+	session.Object["spec"] = map[string]interface{}{}
+	if err := c.Create(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	err := Complete(context.Background(), c, &Exposure{Namespace: "agents", SessionName: "s1"})
+	if err == nil || !strings.Contains(err.Error(), "no SessionUID") {
+		t.Fatalf("expected missing SessionUID error, got %v", err)
+	}
+	got := newObject(SessionGVK, "agents", "s1")
+	get(t, c, SessionGVK, got)
+	if done, _, _ := unstructured.NestedBool(got.Object, "spec", "completed"); done {
+		t.Fatal("session was completed")
 	}
 }
