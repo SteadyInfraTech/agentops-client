@@ -144,6 +144,9 @@ func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure,
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
 		cleanupErr := client.IgnoreNotFound(c.Delete(cleanCtx, session, client.Preconditions{UID: &uid}))
+		if cleanupErr != nil {
+			cleanupErr = fmt.Errorf("deleting AgentSession %q during cleanup (it may remain): %w", session.GetName(), cleanupErr)
+		}
 		return nil, errors.Join(fmt.Errorf("creating AgentEdgeTunnel: %w", err), cleanupErr)
 	}
 

@@ -25,8 +25,12 @@ if err != nil { return err } // if cleanup also failed, the error says so and th
 
 ep, err := agentops.Wait(ctx, c, ex, agentops.WaitOptions{Timeout: 2 * time.Minute})
 if err != nil {
-    // Not usable: retry Wait, or call Complete(ctx, c, ex) to clean up.
-    return err
+    // Not usable. Either keep ex and retry Wait later, or end the session so it
+    // stops using capacity. ctx may be the reason Wait failed, so clean up on a
+    // context that survives its cancellation:
+    cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+    defer cancel()
+    return errors.Join(err, agentops.Complete(cctx, c, ex))
 }
 // ep.URL is https://<hostname>, reachable once the tunnel is Active and its
 // connector is connected.
