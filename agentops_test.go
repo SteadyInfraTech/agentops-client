@@ -260,3 +260,41 @@ func TestWaitStopsOnContextCancel(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestNilExposure(t *testing.T) {
+	c := newClient(false)
+	if err := Complete(context.Background(), c, nil); err == nil {
+		t.Fatal("Complete: expected error")
+	}
+	if _, err := Wait(context.Background(), c, nil, WaitOptions{}); err == nil {
+		t.Fatal("Wait: expected error")
+	}
+}
+
+func TestExposeCleansUpEvenWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	base := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(cctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			obj.SetUID("uid")
+			if obj.GetObjectKind().GroupVersionKind().Kind == TunnelGVK.Kind {
+				cancel()
+				return context.Canceled
+			}
+			return cl.Create(cctx, obj, opts...)
+		},
+		Delete: func(dctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if err := dctx.Err(); err != nil {
+				return err
+			}
+			return cl.Delete(dctx, obj, opts...)
+		},
+	})
+	if _, err := Expose(ctx, c, validRequest()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	session := newObject(SessionGVK, "agents", "s1")
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(session), session); !apierrors.IsNotFound(err) {
+		t.Fatalf("session should be gone, got %v", err)
+	}
+}

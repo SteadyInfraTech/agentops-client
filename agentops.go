@@ -29,6 +29,9 @@ var (
 	TunnelGVK = schema.GroupVersionKind{Group: "edge.steadyinfra.com", Version: "v1alpha1", Kind: "AgentEdgeTunnel"}
 )
 
+// cleanupTimeout bounds the delete that undoes a half-finished Expose.
+const cleanupTimeout = 10 * time.Second
+
 // ExposeRequest describes a session and how to reach it from outside.
 type ExposeRequest struct {
 	// Namespace and Name for both objects. The session and the tunnel share the
@@ -128,7 +131,11 @@ func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure,
 	}})
 	tunnel.Object["spec"] = tunnelSpec(req)
 	if err := c.Create(ctx, tunnel); err != nil {
-		cleanupErr := client.IgnoreNotFound(c.Delete(ctx, session))
+		// ctx may be what made the create fail, so clean up on a context that
+		// survives its cancellation.
+		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		cleanupErr := client.IgnoreNotFound(c.Delete(cleanCtx, session))
 		return nil, errors.Join(fmt.Errorf("creating AgentEdgeTunnel: %w", err), cleanupErr)
 	}
 
@@ -143,6 +150,9 @@ func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure,
 // Complete marks the session finished. The session releases its capacity and
 // the edge operator then removes the tunnel.
 func Complete(ctx context.Context, c client.Client, e *Exposure) error {
+	if e == nil {
+		return errors.New("exposure is nil")
+	}
 	session := newObject(SessionGVK, e.Namespace, e.SessionName)
 	patch := client.RawPatch(types.MergePatchType, []byte(`{"spec":{"completed":true}}`))
 	return c.Patch(ctx, session, patch)
@@ -172,6 +182,9 @@ var ErrTerminated = errors.New("the AgentEdgeTunnel was terminated")
 // retries transient errors, so Wait keeps watching through it and reports the
 // last message if time runs out. Only Terminated ends the wait early.
 func Wait(ctx context.Context, c client.Client, e *Exposure, opts WaitOptions) (*Endpoint, error) {
+	if e == nil {
+		return nil, errors.New("exposure is nil")
+	}
 	if opts.Interval <= 0 {
 		opts.Interval = 2 * time.Second
 	}
