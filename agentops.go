@@ -133,9 +133,12 @@ func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure,
 	if err := c.Create(ctx, tunnel); err != nil {
 		// ctx may be what made the create fail, so clean up on a context that
 		// survives its cancellation.
+		// Only delete the session this call created: if it was replaced in the
+		// meantime, the replacement is not ours to remove.
+		uid := session.GetUID()
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
-		cleanupErr := client.IgnoreNotFound(c.Delete(cleanCtx, session))
+		cleanupErr := client.IgnoreNotFound(c.Delete(cleanCtx, session, client.Preconditions{UID: &uid}))
 		return nil, errors.Join(fmt.Errorf("creating AgentEdgeTunnel: %w", err), cleanupErr)
 	}
 

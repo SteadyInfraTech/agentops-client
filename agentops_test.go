@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+// validRequest is a test helper.
 func validRequest() ExposeRequest {
 	return ExposeRequest{
 		Namespace: "agents", Name: "s1", PoolName: "pool",
@@ -37,6 +38,7 @@ func newClient(failTunnel bool) client.Client {
 	}).Build()
 }
 
+// get is a test helper.
 func get(t *testing.T, c client.Client, gvk interface{ String() string }, u *unstructured.Unstructured) {
 	t.Helper()
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(u), u); err != nil {
@@ -44,6 +46,7 @@ func get(t *testing.T, c client.Client, gvk interface{ String() string }, u *uns
 	}
 }
 
+// TestValidate checks the behaviour its name describes.
 func TestValidate(t *testing.T) {
 	cases := map[string]func(*ExposeRequest){
 		"no namespace":      func(r *ExposeRequest) { r.Namespace = "" },
@@ -71,6 +74,7 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// TestExposeCreatesSessionAndOwnedTunnel checks the behaviour its name describes.
 func TestExposeCreatesSessionAndOwnedTunnel(t *testing.T) {
 	c := newClient(false)
 	d := int64(0)
@@ -115,6 +119,7 @@ func TestExposeCreatesSessionAndOwnedTunnel(t *testing.T) {
 	}
 }
 
+// TestExposeAgentServiceAndPublic checks the behaviour its name describes.
 func TestExposeAgentServiceAndPublic(t *testing.T) {
 	c := newClient(false)
 	req := validRequest()
@@ -135,6 +140,7 @@ func TestExposeAgentServiceAndPublic(t *testing.T) {
 	}
 }
 
+// TestExposeRemovesSessionWhenTunnelFails checks the behaviour its name describes.
 func TestExposeRemovesSessionWhenTunnelFails(t *testing.T) {
 	c := newClient(true)
 	_, err := Expose(context.Background(), c, validRequest())
@@ -147,6 +153,7 @@ func TestExposeRemovesSessionWhenTunnelFails(t *testing.T) {
 	}
 }
 
+// TestExposeRejectsInvalidRequest checks the behaviour its name describes.
 func TestExposeRejectsInvalidRequest(t *testing.T) {
 	r := validRequest()
 	r.PoolName = ""
@@ -155,6 +162,7 @@ func TestExposeRejectsInvalidRequest(t *testing.T) {
 	}
 }
 
+// TestComplete checks the behaviour its name describes.
 func TestComplete(t *testing.T) {
 	c := newClient(false)
 	ex, err := Expose(context.Background(), c, validRequest())
@@ -174,6 +182,7 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+// setStatus is a test helper.
 func setStatus(t *testing.T, c client.Client, ex *Exposure, status map[string]interface{}) {
 	t.Helper()
 	tunnel := newObject(TunnelGVK, ex.Namespace, ex.TunnelName)
@@ -184,6 +193,7 @@ func setStatus(t *testing.T, c client.Client, ex *Exposure, status map[string]in
 	}
 }
 
+// TestWait checks the behaviour its name describes.
 func TestWait(t *testing.T) {
 	opts := WaitOptions{Interval: time.Millisecond, Timeout: 50 * time.Millisecond}
 	cases := []struct {
@@ -236,6 +246,7 @@ func TestWait(t *testing.T) {
 	}
 }
 
+// TestWaitToleratesMissingTunnelThenSucceeds checks the behaviour its name describes.
 func TestWaitToleratesMissingTunnelThenSucceeds(t *testing.T) {
 	c := newClient(false)
 	ex := &Exposure{Namespace: "agents", SessionName: "s1", TunnelName: "s1"}
@@ -251,6 +262,7 @@ func TestWaitToleratesMissingTunnelThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestWaitStopsOnContextCancel checks the behaviour its name describes.
 func TestWaitStopsOnContextCancel(t *testing.T) {
 	c := newClient(false)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -261,6 +273,7 @@ func TestWaitStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestNilExposure checks the behaviour its name describes.
 func TestNilExposure(t *testing.T) {
 	c := newClient(false)
 	if err := Complete(context.Background(), c, nil); err == nil {
@@ -271,6 +284,7 @@ func TestNilExposure(t *testing.T) {
 	}
 }
 
+// TestExposeCleansUpEvenWhenContextIsCancelled checks the behaviour its name describes.
 func TestExposeCleansUpEvenWhenContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	base := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
@@ -296,5 +310,24 @@ func TestExposeCleansUpEvenWhenContextIsCancelled(t *testing.T) {
 	session := newObject(SessionGVK, "agents", "s1")
 	if err := base.Get(context.Background(), client.ObjectKeyFromObject(session), session); !apierrors.IsNotFound(err) {
 		t.Fatalf("session should be gone, got %v", err)
+	}
+}
+
+// TestExposeCleanupIsPinnedToTheCreatedSessionUID checks the behaviour its name describes.
+func TestExposeCleanupIsPinnedToTheCreatedSessionUID(t *testing.T) {
+	var got *client.DeleteOptions
+	base := newClient(true)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			got = &client.DeleteOptions{}
+			got.ApplyOptions(opts)
+			return cl.Delete(ctx, obj, opts...)
+		},
+	})
+	if _, err := Expose(context.Background(), c, validRequest()); err == nil {
+		t.Fatal("expected an error")
+	}
+	if got == nil || got.Preconditions == nil || got.Preconditions.UID == nil || *got.Preconditions.UID != "uid-s1" {
+		t.Fatalf("cleanup delete was not pinned to the session UID: %+v", got)
 	}
 }
