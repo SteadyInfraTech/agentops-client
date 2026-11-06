@@ -109,8 +109,8 @@ func (r ExposeRequest) Validate() error {
 // Expose creates the AgentSession, then the AgentEdgeTunnel that follows it.
 // The tunnel carries an ownerReference to the session, so deleting the session
 // deletes the tunnel, and the edge operator also removes the tunnel's
-// Cloudflare resources when the session ends. If the tunnel cannot be created,
-// the session is deleted again so a failed call leaves nothing behind.
+// Cloudflare resources when the session ends. If tunnel creation fails, Expose
+// attempts to delete the session and includes any cleanup error in its return.
 //
 // The tunnel is not usable yet when Expose returns: call Wait.
 func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure, error) {

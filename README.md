@@ -21,9 +21,13 @@ ex, err := agentops.Expose(ctx, c, agentops.ExposeRequest{
     ZoneID:    "<cloudflare zone id>", Subdomain: "session-42",
     AllowedEmails: []string{"user@example.com"}, // or AllowPublic: true
 })
-if err != nil { /* nothing was left behind */ }
+if err != nil { return err } // if cleanup also failed, the error says so and the session may remain
 
 ep, err := agentops.Wait(ctx, c, ex, agentops.WaitOptions{Timeout: 2 * time.Minute})
+if err != nil {
+    // Not usable: retry Wait, or call Complete(ctx, c, ex) to clean up.
+    return err
+}
 // ep.URL is https://<hostname>, reachable once the tunnel is Active and its
 // connector is connected.
 
@@ -32,7 +36,7 @@ err = agentops.Complete(ctx, c, ex)
 ```
 
 `Expose` creates the `AgentSession`, then an `AgentEdgeTunnel` with `spec.sessionRef` and an
-`ownerReference` to the session. If the tunnel cannot be created the session is deleted again.
+`ownerReference` to the session. If tunnel creation fails, `Expose` attempts to delete the session; if that deletion fails, the returned error includes the cleanup error and the session may remain.
 `Wait` keeps waiting through `Failed` (the edge operator retries) and stops early only on
 `Terminated`. The client `c` is any controller-runtime client with access to both kinds.
 
