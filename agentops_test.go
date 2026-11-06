@@ -32,7 +32,9 @@ func newClient(failTunnel bool) client.Client {
 			if failTunnel && obj.GetObjectKind().GroupVersionKind().Kind == TunnelGVK.Kind {
 				return errors.New("boom")
 			}
-			obj.SetUID(types.UID("uid-" + obj.GetName()))
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID("uid-" + obj.GetName()))
+			}
 			return c.Create(ctx, obj, opts...)
 		},
 	}).Build()
