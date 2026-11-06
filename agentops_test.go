@@ -353,8 +353,8 @@ func TestCompleteRefusesAReplacedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Complete(context.Background(), c, ex); err == nil {
-		t.Fatal("expected the UID test to fail")
+	if err := Complete(context.Background(), c, ex); err == nil || !strings.Contains(err.Error(), "metadata/uid") {
+		t.Fatalf("expected the UID test to fail, got %v", err)
 	}
 	got := newObject(SessionGVK, "agents", "s1")
 	get(t, c, SessionGVK, got)
@@ -384,5 +384,13 @@ func TestWaitRefusesAReplacedTunnel(t *testing.T) {
 	ep, err := Wait(context.Background(), c, ex, WaitOptions{Interval: time.Millisecond, Timeout: 50 * time.Millisecond})
 	if !errors.Is(err, ErrTerminated) || ep != nil {
 		t.Fatalf("ep=%+v err=%v", ep, err)
+	}
+}
+
+// TestCompleteRequiresSessionUID checks that Complete refuses an exposure without a session UID.
+func TestCompleteRequiresSessionUID(t *testing.T) {
+	err := Complete(context.Background(), newClient(false), &Exposure{Namespace: "agents", SessionName: "s1"})
+	if err == nil {
+		t.Fatal("expected an error")
 	}
 }

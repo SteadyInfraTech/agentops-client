@@ -162,10 +162,10 @@ func Complete(ctx context.Context, c client.Client, e *Exposure) error {
 	if e == nil {
 		return errors.New("exposure is nil")
 	}
-	session := newObject(SessionGVK, e.Namespace, e.SessionName)
 	if e.SessionUID == "" {
-		return c.Patch(ctx, session, client.RawPatch(types.MergePatchType, []byte(`{"spec":{"completed":true}}`)))
+		return errors.New("exposure has no SessionUID; use the value returned by Expose")
 	}
+	session := newObject(SessionGVK, e.Namespace, e.SessionName)
 	// Test the UID in the same atomic patch, so a session deleted and recreated
 	// under this name is not completed by mistake. The API server rejects the
 	// patch if the UID differs.
