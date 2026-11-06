@@ -331,3 +331,56 @@ func TestExposeCleanupIsPinnedToTheCreatedSessionUID(t *testing.T) {
 		t.Fatalf("cleanup delete was not pinned to the session UID: %+v", got)
 	}
 }
+
+// TestCompleteRefusesAReplacedSession checks that a session recreated under the same name is left alone.
+func TestCompleteRefusesAReplacedSession(t *testing.T) {
+	c := newClient(false)
+	ex, err := Expose(context.Background(), c, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := newObject(SessionGVK, "agents", "s1")
+	get(t, c, SessionGVK, old)
+	if err := c.Delete(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	repl := newObject(SessionGVK, "agents", "s1")
+	repl.SetUID("replacement")
+	repl.Object["spec"] = map[string]interface{}{"poolRef": map[string]interface{}{"name": "pool"}}
+	if err := c.Create(context.Background(), repl); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Complete(context.Background(), c, ex); err == nil {
+		t.Fatal("expected the UID test to fail")
+	}
+	got := newObject(SessionGVK, "agents", "s1")
+	get(t, c, SessionGVK, got)
+	if done, _, _ := unstructured.NestedBool(got.Object, "spec", "completed"); done {
+		t.Fatal("the replacement session was completed")
+	}
+}
+
+// TestWaitRefusesAReplacedTunnel checks that Wait does not return another exposure's endpoint.
+func TestWaitRefusesAReplacedTunnel(t *testing.T) {
+	c := newClient(false)
+	ex, err := Expose(context.Background(), c, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := newObject(TunnelGVK, "agents", "s1")
+	get(t, c, TunnelGVK, old)
+	if err := c.Delete(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	repl := newObject(TunnelGVK, "agents", "s1")
+	repl.SetUID("other")
+	repl.Object["status"] = map[string]interface{}{"phase": "Active", "connectorReady": true, "hostname": "evil.example.com"}
+	if err := c.Create(context.Background(), repl); err != nil {
+		t.Fatal(err)
+	}
+	ep, err := Wait(context.Background(), c, ex, WaitOptions{Interval: time.Millisecond, Timeout: 50 * time.Millisecond})
+	if !errors.Is(err, ErrTerminated) || ep != nil {
+		t.Fatalf("ep=%+v err=%v", ep, err)
+	}
+}

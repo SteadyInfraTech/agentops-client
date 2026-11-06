@@ -8,6 +8,7 @@ package agentops
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -68,8 +69,12 @@ type Exposure struct {
 	Namespace   string
 	SessionName string
 	TunnelName  string
-	// SessionUID is the UID of the created session.
+	// SessionUID is the UID of the created session. Complete only acts on a
+	// session with this UID.
 	SessionUID types.UID
+	// TunnelUID is the UID of the created tunnel. When set, Wait only trusts a
+	// tunnel with this UID.
+	TunnelUID types.UID
 }
 
 // Validate reports a request that could never produce a working exposure.
@@ -147,18 +152,31 @@ func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure,
 		SessionName: session.GetName(),
 		TunnelName:  tunnel.GetName(),
 		SessionUID:  session.GetUID(),
+		TunnelUID:   tunnel.GetUID(),
 	}, nil
 }
 
-// Complete marks the session finished. The session releases its capacity and
+// Complete marks the session finished, if it is still the one Expose created. The session releases its capacity and
 // the edge operator then removes the tunnel.
 func Complete(ctx context.Context, c client.Client, e *Exposure) error {
 	if e == nil {
 		return errors.New("exposure is nil")
 	}
 	session := newObject(SessionGVK, e.Namespace, e.SessionName)
-	patch := client.RawPatch(types.MergePatchType, []byte(`{"spec":{"completed":true}}`))
-	return c.Patch(ctx, session, patch)
+	if e.SessionUID == "" {
+		return c.Patch(ctx, session, client.RawPatch(types.MergePatchType, []byte(`{"spec":{"completed":true}}`)))
+	}
+	// Test the UID in the same atomic patch, so a session deleted and recreated
+	// under this name is not completed by mistake. The API server rejects the
+	// patch if the UID differs.
+	ops, err := json.Marshal([]map[string]interface{}{
+		{"op": "test", "path": "/metadata/uid", "value": string(e.SessionUID)},
+		{"op": "add", "path": "/spec/completed", "value": true},
+	})
+	if err != nil {
+		return err
+	}
+	return c.Patch(ctx, session, client.RawPatch(types.JSONPatchType, ops))
 }
 
 // Endpoint is where a client reaches the exposed agent.
@@ -203,6 +221,9 @@ func Wait(ctx context.Context, c client.Client, e *Exposure, opts WaitOptions) (
 		err := c.Get(ctx, client.ObjectKeyFromObject(tunnel), tunnel)
 		switch {
 		case err == nil:
+			if e.TunnelUID != "" && tunnel.GetUID() != e.TunnelUID {
+				return nil, fmt.Errorf("%w: the AgentEdgeTunnel %q was replaced by another object", ErrTerminated, e.TunnelName)
+			}
 			phase, _, _ := unstructured.NestedString(tunnel.Object, "status", "phase")
 			message, _, _ := unstructured.NestedString(tunnel.Object, "status", "message")
 			hostname, _, _ := unstructured.NestedString(tunnel.Object, "status", "hostname")
