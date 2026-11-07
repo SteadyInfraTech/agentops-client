@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test of agentops-operator, ai-agent-edge-tunnel and this client together on a kind cluster.
 #
-# It needs no Cloudflare account: the edge operator gets a fake token, so everything that talks to
-# Cloudflare (tunnel, DNS, Access application, connector, public URL) is NOT covered. It covers the
+# By default it needs no Cloudflare account: the edge operator gets a fake token, so everything that
+# talks to Cloudflare (tunnel, DNS, Access application, connector, public URL) is NOT covered. It covers the
 # cluster half: installs, CRDs, binding, sessionRef waiting and pinning, termination, RBAC, access-policy refusal
 # and the client's Expose/Complete.
 #
@@ -11,6 +11,13 @@
 #   EDGE_DIR      checkout of ai-agent-edge-tunnel (default ../ai-agent-edge-tunnel)
 #   CLUSTER       kind cluster name                (default agentops-smoke)
 # Needs docker, kind, kubectl, kustomize and go on PATH.
+#
+# LIVE=1 runs the same flow against real Cloudflare instead (for CI on main only, never for pull
+# requests: it uses credentials). It also needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
+# CLOUDFLARE_ZONE_ID and CLOUDFLARE_TEST_HOSTNAME (a full hostname inside the zone; its parent domain
+# is used as the base domain). It then also covers the Access application, DNS record, connector,
+# the public URL's Access gate, and verifies Cloudflare holds nothing afterwards.
+# CONNECTOR_IMAGE overrides the cloudflared image.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,6 +28,19 @@ NS=smoke
 OP_IMG=agentops-operator:ci
 EDGE_IMG=ai-agent-edge-tunnel:ci
 AGENT_IMG=echo-agent:ci
+
+LIVE="${LIVE:-0}"
+CLIENT_NAME=viaclient
+if [ "$LIVE" = 1 ]; then
+  : "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}" "${CLOUDFLARE_ZONE_ID:?}" "${CLOUDFLARE_TEST_HOSTNAME:?}"
+  BASE_DOMAIN="${CLOUDFLARE_TEST_HOSTNAME#*.}"
+  CONNECTOR_IMAGE="${CONNECTOR_IMAGE:-cloudflare/cloudflared:2024.10.0}"
+  CLIENT_NAME="ci-${GITHUB_RUN_ID:-$(date +%s)}"
+  HOST="$CLIENT_NAME.$BASE_DOMAIN"
+else
+  BASE_DOMAIN=agents.example.test
+  CONNECTOR_IMAGE=cloudflare/cloudflared:2024.1.0
+fi
 
 pass=0
 step() { printf '\n== %s\n' "$*"; }
@@ -51,6 +71,45 @@ wait_field() {
   return 1
 }
 
+# cf PATH [curl args] calls the Cloudflare API with the test token.
+cf() { local p="$1"; shift; curl -sS --max-time 30 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$@" "https://api.cloudflare.com/client/v4/$p"; }
+
+# cf_dns_ids, cf_access_ids and cf_tunnel_state query Cloudflare through hack/cf-ids.py, which fails on
+# any API error, so an error is never read as "nothing there".
+export HOST CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID
+cf_dns_ids() { "$HERE/hack/cf-ids.py" dns; }
+cf_access_ids() { "$HERE/hack/cf-ids.py" access; }
+cf_tunnel_state() { "$HERE/hack/cf-ids.py" tunnel "$1"; }
+# cf_gone succeeds only when both queries worked and found nothing.
+cf_gone() { local d a; d="$(cf_dns_ids)" || return 1; a="$(cf_access_ids)" || return 1; [ -z "$d$a" ]; }
+
+# cf_delete PATH deletes through the API and says so loudly if Cloudflare did not confirm.
+cf_delete() {
+  if ! cf "$1" -X DELETE | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") is True else 1)'; then
+    echo "FAILED to delete $1 in Cloudflare: remove it by hand" >&2
+  fi
+}
+
+TUNNEL_ID=""
+# live_cleanup runs on exit in LIVE mode. The operator removes its own Cloudflare resources when its
+# objects are deleted; then anything still left for this run's hostname (and the tunnel, if its ID is
+# known) is deleted through the API and reported. If a lookup or delete itself fails, it says so, and
+# the resource may remain: nothing here can promise otherwise.
+live_cleanup() {
+  set +e
+  kubectl -n "$NS" delete agentsession,agentedgetunnel --all --wait=true --timeout=120s >/dev/null 2>&1
+  local ids state
+  ids="$(cf_dns_ids)" || echo "could not list DNS records for $HOST: check Cloudflare by hand" >&2
+  for id in $ids; do echo "LEFTOVER dns record $id for $HOST: deleting" >&2; cf_delete "zones/$CLOUDFLARE_ZONE_ID/dns_records/$id"; done
+  ids="$(cf_access_ids)" || echo "could not list Access applications for $HOST: check Cloudflare by hand" >&2
+  for id in $ids; do echo "LEFTOVER access application $id for $HOST: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/$id"; done
+  if [ -n "$TUNNEL_ID" ]; then
+    state="$(cf_tunnel_state "$TUNNEL_ID")" || echo "could not look up tunnel $TUNNEL_ID: check Cloudflare by hand" >&2
+    if [ "$state" = exists ]; then echo "LEFTOVER tunnel $TUNNEL_ID: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID"; fi
+  fi
+}
+[ "$LIVE" = 1 ] && trap live_cleanup EXIT
+
 step "cluster"
 if ! kind get clusters | grep -qx "$CLUSTER"; then kind create cluster --name "$CLUSTER" --wait 120s; fi
 kubectl cluster-info >/dev/null
@@ -68,13 +127,14 @@ kubectl -n agentops-operator-system patch deploy agentops-operator-controller-ma
 kubectl -n agentops-operator-system rollout status deploy/agentops-operator-controller-manager --timeout=180s
 ok "agentops-operator is running"
 
-step "install ai-agent-edge-tunnel (fake Cloudflare credentials)"
+step "install ai-agent-edge-tunnel ($([ "$LIVE" = 1 ] && echo real || echo fake) Cloudflare credentials)"
 kubectl create namespace edge-tunnel-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n edge-tunnel-system create secret generic edge-tunnel-cloudflare \
-  --from-literal=account-id=smoke --from-literal=api-token=smoke --dry-run=client -o yaml | kubectl apply -f -
+  --from-literal=account-id="${CLOUDFLARE_ACCOUNT_ID:-smoke}" --from-literal=api-token="${CLOUDFLARE_API_TOKEN:-smoke}" \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
-  --from-literal=EDGE_BASE_DOMAIN=agents.example.test \
-  --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2024.1.0 --dry-run=client -o yaml | kubectl apply -f -
+  --from-literal=EDGE_BASE_DOMAIN="$BASE_DOMAIN" \
+  --from-literal=CONNECTOR_IMAGE="$CONNECTOR_IMAGE" --dry-run=client -o yaml | kubectl apply -f -
 (cd "$EDGE_DIR" && make deploy IMG="$EDGE_IMG")
 kubectl -n edge-tunnel-system patch deploy edge-tunnel-controller-manager --type=json \
   -p='[{"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
@@ -162,22 +222,71 @@ wait_field early agentedgetunnel '{.status.phase}' Terminated 120 || fail "tunne
 ok "tunnel Terminated after session completion"
 
 step "client: Expose creates both objects, then Complete ends the session"
-# Cloudflare is fake, so Wait cannot succeed: the example must time out, clean up and exit non-zero.
-if (cd "$HERE" && go run ./examples/smoke -namespace "$NS" -name viaclient -pool smoke \
-    -zone-id zone -email smoke@example.com -timeout 45s); then
-  fail "the smoke example succeeded although Cloudflare is fake"
+if [ "$LIVE" = 1 ]; then
+  # Real Cloudflare: the exposure must become usable. -keep leaves the session running.
+  (cd "$HERE" && go run ./examples/smoke -namespace "$NS" -name "$CLIENT_NAME" -pool smoke \
+      -zone-id "$CLOUDFLARE_ZONE_ID" -email smoke@example.com -timeout 6m -keep) || fail "Expose/Wait did not produce a usable endpoint"
+  [ "$(field "$CLIENT_NAME" agentedgetunnel '{.status.phase}')" = Active ] || fail "tunnel is not Active"
+  [ "$(field "$CLIENT_NAME" agentedgetunnel '{.status.connectorReady}')" = true ] || fail "connector is not ready"
+  [ "$(field "$CLIENT_NAME" agentedgetunnel '{.status.hostname}')" = "$HOST" ] || fail "unexpected hostname '$(field "$CLIENT_NAME" agentedgetunnel '{.status.hostname}')', wanted $HOST"
+  TUNNEL_ID="$(field "$CLIENT_NAME" agentedgetunnel '{.status.tunnelID}')"
+  ok "tunnel Active with a connected connector at $HOST"
+
+  step "Cloudflare holds the DNS record and Access application"
+  [ -n "$(cf_dns_ids)" ] || fail "no DNS record for $HOST"
+  [ -n "$(cf_access_ids)" ] || fail "no Access application for $HOST"
+  ok "DNS record and Access application exist"
+
+  step "the public URL is behind the Access login"
+  end=$((SECONDS + 180)); code=""; loc=""
+  while [ "$SECONDS" -lt "$end" ]; do
+    hdr="$(curl -sS --max-time 20 -o /dev/null -D - "https://$HOST/" 2>&1 || true)"
+    code="$(printf '%s' "$hdr" | head -1 | awk '{print $2}')"
+    loc="$(printf '%s' "$hdr" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')"
+    case "$code:$loc" in 3??:*cloudflareaccess.com*) break ;; esac
+    sleep 5
+  done
+  case "$code:$loc" in
+    3??:*cloudflareaccess.com*) ok "unauthenticated request is redirected to Cloudflare Access ($code)" ;;
+    *) fail "expected a redirect to Cloudflare Access, got status '$code' location '$loc'. Response: $hdr" ;;
+  esac
+
+  step "completing the session removes everything from Cloudflare"
+  tunnel_id="$(field "$CLIENT_NAME" agentedgetunnel '{.status.tunnelID}')"
+  [ -n "$tunnel_id" ] || fail "tunnel has no tunnelID in status"
+  kubectl -n "$NS" patch agentsession "$CLIENT_NAME" --type merge -p '{"spec":{"completed":true}}'
+  wait_field "$CLIENT_NAME" agentedgetunnel '{.status.phase}' Terminated 180 || fail "tunnel did not terminate"
+  end=$((SECONDS + 120))
+  until cf_gone; do
+    [ "$SECONDS" -lt "$end" ] || fail "Cloudflare still holds a DNS record or Access application for $HOST"
+    sleep 3
+  done
+  end=$((SECONDS + 60)); state=""
+  until [ "$state" = deleted ]; do
+    state="$(cf_tunnel_state "$tunnel_id")" || state=""
+    [ "$state" = deleted ] && break
+    [ "$SECONDS" -lt "$end" ] || fail "Cloudflare tunnel $tunnel_id is not confirmed deleted (state '$state')"
+    sleep 3
+  done
+  ok "DNS record, Access application and tunnel are gone"
+else
+  # Cloudflare is fake, so Wait cannot succeed: the example must time out, clean up and exit non-zero.
+  if (cd "$HERE" && go run ./examples/smoke -namespace "$NS" -name "$CLIENT_NAME" -pool smoke \
+      -zone-id zone -email smoke@example.com -timeout 45s); then
+    fail "the smoke example succeeded although Cloudflare is fake"
+  fi
+  owner="$(kubectl -n "$NS" get agentedgetunnel "$CLIENT_NAME" -o jsonpath='{.metadata.ownerReferences[0].kind}')"
+  [ "$owner" = AgentSession ] || fail "tunnel created by the client has no AgentSession ownerReference (got '$owner')"
+  [ "$(field "$CLIENT_NAME" agentsession '{.spec.completed}')" = true ] || fail "the client did not complete the session after Wait failed"
+  suid="$(field "$CLIENT_NAME" agentsession '{.metadata.uid}')"
+  wait_field "$CLIENT_NAME" agentedgetunnel '{.status.sessionUID}' "$suid" 60 || fail "client-created tunnel did not pin its session"
+  ok "client created session and owned tunnel, and completed the session after the failed wait"
 fi
-owner="$(kubectl -n "$NS" get agentedgetunnel viaclient -o jsonpath='{.metadata.ownerReferences[0].kind}')"
-[ "$owner" = AgentSession ] || fail "tunnel created by the client has no AgentSession ownerReference (got '$owner')"
-[ "$(field viaclient agentsession '{.spec.completed}')" = true ] || fail "the client did not complete the session after Wait failed"
-suid="$(field viaclient agentsession '{.metadata.uid}')"
-wait_field viaclient agentedgetunnel '{.status.sessionUID}' "$suid" 60 || fail "client-created tunnel did not pin its session"
-ok "client created session and owned tunnel, and completed the session after the failed wait"
 
 step "deleting the session deletes its tunnel"
-kubectl -n "$NS" delete agentsession viaclient --wait=true
+kubectl -n "$NS" delete agentsession "$CLIENT_NAME" --wait=true
 end=$((SECONDS + 60))
-while kubectl -n "$NS" get agentedgetunnel viaclient >/dev/null 2>&1; do
+while kubectl -n "$NS" get agentedgetunnel "$CLIENT_NAME" >/dev/null 2>&1; do
   [ "$SECONDS" -lt "$end" ] || fail "tunnel outlived its deleted session"
   sleep 2
 done
