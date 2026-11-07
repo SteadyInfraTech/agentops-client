@@ -74,18 +74,39 @@ wait_field() {
 # cf PATH [curl args] calls the Cloudflare API with the test token.
 cf() { local p="$1"; shift; curl -sS --max-time 30 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$@" "https://api.cloudflare.com/client/v4/$p"; }
 
-# cf_dns_ids and cf_access_ids print the IDs of this run's DNS records and Access applications.
-cf_dns_ids() { cf "zones/$CLOUDFLARE_ZONE_ID/dns_records?name=$HOST" | python3 -c 'import sys,json; print("\n".join(r["id"] for r in json.load(sys.stdin).get("result",[])))'; }
-cf_access_ids() { cf "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps?per_page=100" | HOST="$HOST" python3 -c 'import sys,json,os; print("\n".join(a["id"] for a in json.load(sys.stdin).get("result",[]) if a.get("domain")==os.environ["HOST"]))'; }
+# cf_dns_ids, cf_access_ids and cf_tunnel_state query Cloudflare through hack/cf-ids.py, which fails on
+# any API error, so an error is never read as "nothing there".
+export HOST CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID
+cf_dns_ids() { "$HERE/hack/cf-ids.py" dns; }
+cf_access_ids() { "$HERE/hack/cf-ids.py" access; }
+cf_tunnel_state() { "$HERE/hack/cf-ids.py" tunnel "$1"; }
+# cf_gone succeeds only when both queries worked and found nothing.
+cf_gone() { local d a; d="$(cf_dns_ids)" || return 1; a="$(cf_access_ids)" || return 1; [ -z "$d$a" ]; }
 
+# cf_delete PATH deletes through the API and says so loudly if Cloudflare did not confirm.
+cf_delete() {
+  if ! cf "$1" -X DELETE | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("success") is True else 1)'; then
+    echo "FAILED to delete $1 in Cloudflare: remove it by hand" >&2
+  fi
+}
+
+TUNNEL_ID=""
 # live_cleanup runs on exit in LIVE mode. The operator removes its own Cloudflare resources when its
-# objects are deleted; then anything still left for this run's hostname is deleted through the API
-# and reported, so a failed run does not leave resources behind.
+# objects are deleted; then anything still left for this run's hostname (and the tunnel, if its ID is
+# known) is deleted through the API and reported. If a lookup or delete itself fails, it says so, and
+# the resource may remain: nothing here can promise otherwise.
 live_cleanup() {
   set +e
   kubectl -n "$NS" delete agentsession,agentedgetunnel --all --wait=true --timeout=120s >/dev/null 2>&1
-  for id in $(cf_dns_ids); do echo "LEFTOVER dns record $id for $HOST: deleting" >&2; cf "zones/$CLOUDFLARE_ZONE_ID/dns_records/$id" -X DELETE >/dev/null; done
-  for id in $(cf_access_ids); do echo "LEFTOVER access application $id for $HOST: deleting" >&2; cf "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/$id" -X DELETE >/dev/null; done
+  local ids
+  ids="$(cf_dns_ids)" || echo "could not list DNS records for $HOST: check Cloudflare by hand" >&2
+  for id in $ids; do echo "LEFTOVER dns record $id for $HOST: deleting" >&2; cf_delete "zones/$CLOUDFLARE_ZONE_ID/dns_records/$id"; done
+  ids="$(cf_access_ids)" || echo "could not list Access applications for $HOST: check Cloudflare by hand" >&2
+  for id in $ids; do echo "LEFTOVER access application $id for $HOST: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/$id"; done
+  if [ -n "$TUNNEL_ID" ]; then
+    state="$(cf_tunnel_state "$TUNNEL_ID")" || echo "could not look up tunnel $TUNNEL_ID: check Cloudflare by hand" >&2
+    if [ "$state" = exists ]; then echo "LEFTOVER tunnel $TUNNEL_ID: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID"; fi
+  fi
 }
 [ "$LIVE" = 1 ] && trap live_cleanup EXIT
 
@@ -208,6 +229,7 @@ if [ "$LIVE" = 1 ]; then
   [ "$(field "$CLIENT_NAME" agentedgetunnel '{.status.phase}')" = Active ] || fail "tunnel is not Active"
   [ "$(field "$CLIENT_NAME" agentedgetunnel '{.status.connectorReady}')" = true ] || fail "connector is not ready"
   [ "$(field "$CLIENT_NAME" agentedgetunnel '{.status.hostname}')" = "$HOST" ] || fail "unexpected hostname '$(field "$CLIENT_NAME" agentedgetunnel '{.status.hostname}')', wanted $HOST"
+  TUNNEL_ID="$(field "$CLIENT_NAME" agentedgetunnel '{.status.tunnelID}')"
   ok "tunnel Active with a connected connector at $HOST"
 
   step "Cloudflare holds the DNS record and Access application"
@@ -235,12 +257,17 @@ if [ "$LIVE" = 1 ]; then
   kubectl -n "$NS" patch agentsession "$CLIENT_NAME" --type merge -p '{"spec":{"completed":true}}'
   wait_field "$CLIENT_NAME" agentedgetunnel '{.status.phase}' Terminated 180 || fail "tunnel did not terminate"
   end=$((SECONDS + 120))
-  until [ -z "$(cf_dns_ids)" ] && [ -z "$(cf_access_ids)" ]; do
+  until cf_gone; do
     [ "$SECONDS" -lt "$end" ] || fail "Cloudflare still holds a DNS record or Access application for $HOST"
     sleep 3
   done
-  deleted="$(cf "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$tunnel_id" | python3 -c 'import sys,json; r=json.load(sys.stdin); print("yes" if (not r.get("success")) or r.get("result",{}).get("deleted_at") else "no")')"
-  [ "$deleted" = yes ] || fail "Cloudflare tunnel $tunnel_id still exists"
+  end=$((SECONDS + 60)); state=""
+  until [ "$state" = deleted ]; do
+    state="$(cf_tunnel_state "$tunnel_id")" || state=""
+    [ "$state" = deleted ] && break
+    [ "$SECONDS" -lt "$end" ] || fail "Cloudflare tunnel $tunnel_id is not confirmed deleted (state '$state')"
+    sleep 3
+  done
   ok "DNS record, Access application and tunnel are gone"
 else
   # Cloudflare is fake, so Wait cannot succeed: the example must time out, clean up and exit non-zero.
