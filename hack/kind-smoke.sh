@@ -3,7 +3,7 @@
 #
 # It needs no Cloudflare account: the edge operator gets a fake token, so everything that talks to
 # Cloudflare (tunnel, DNS, Access application, connector, public URL) is NOT covered. It covers the
-# cluster half: installs, CRDs, binding, sessionRef waiting and pinning, termination, RBAC, validation
+# cluster half: installs, CRDs, binding, sessionRef waiting and pinning, termination, RBAC, access-policy refusal
 # and the client's Expose/Complete.
 #
 # Environment:
@@ -105,16 +105,24 @@ done
 ok "edge operator RBAC on agentsessions is get-only"
 
 step "validation: a tunnel is never public by omission"
-if kubectl -n "$NS" apply --dry-run=server -f - >/dev/null 2>&1 <<'E2'
+# The CRD only rejects allowedEmails together with allowPublic; the controller refuses a tunnel with
+# neither, so this shows up as Failed in status, before anything is created in Cloudflare.
+kubectl -n "$NS" apply -f - <<'E2'
 apiVersion: edge.steadyinfra.com/v1alpha1
 kind: AgentEdgeTunnel
 metadata: {name: nosecurity}
 spec:
-  sessionRef: {name: x}
+  service: {name: echo, port: 8080}
   cloudflare: {zoneID: zone, subdomain: nosecurity}
 E2
-then fail "a tunnel with no access rule was accepted"; fi
-ok "tunnel without allowedEmails or allowPublic is rejected"
+wait_field nosecurity agentedgetunnel '{.status.phase}' Failed 60 || fail "a tunnel with no access rule was not marked Failed"
+case "$(field nosecurity agentedgetunnel '{.status.message}')" in
+  *"no access policy"*) ;;
+  *) fail "Failed for the wrong reason: $(field nosecurity agentedgetunnel '{.status.message}')" ;;
+esac
+[ -z "$(field nosecurity agentedgetunnel '{.status.tunnelID}')" ] || fail "a Cloudflare tunnel was created for an unprotected spec"
+kubectl -n "$NS" delete agentedgetunnel nosecurity --wait=true
+ok "tunnel without allowedEmails or allowPublic is refused before anything is created"
 
 step "sessionRef waits for a session that does not exist yet"
 kubectl -n "$NS" apply -f - <<'E2'
