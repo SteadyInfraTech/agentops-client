@@ -52,3 +52,9 @@ If creating the session itself fails ambiguously (a lost response, say), it may 
 
 Both operators must be installed; this library depends on neither and only handles the objects as
 unstructured. The tunnel exposes the agent's Service, not one session, so it gives no per-session isolation.
+
+## Trying it on a cluster
+
+`examples/smoke` is a small program that exposes one session and prints the URL, and
+`docs/smoke-test.md` is the checklist for running both operators and this client together for the
+first time.
