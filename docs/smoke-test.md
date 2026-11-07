@@ -45,6 +45,10 @@ The command blocks and keeps the session open. Leave it running in this terminal
 below from a second one. Press Ctrl-C in the first terminal only after they finish: it completes the
 session and starts tunnel teardown.
 
+If the endpoint is not ready within `-timeout` (default 3 minutes) the command ends the session and
+exits with an error. Delete any leftover `agentsession` and `agentedgetunnel` named `smoke`, then rerun
+with a longer `-timeout` (for example `-timeout 10m`). `-keep` leaves the session running on exit.
+
 Expected, in order:
 
 1. The program prints the session UID.
@@ -63,6 +67,9 @@ Expected, in order:
   merge -p '{"spec":{"completed":true}}'`). Within about 10 seconds plus reconcile time the tunnel
   goes `Terminated`, and the connector Deployment, DNS record, Access application and Cloudflare tunnel
   are gone. Look in the Cloudflare dashboard, not only in the cluster.
+- **Fresh exposure per destructive check.** Once a tunnel is `Terminated` it stays terminated. Before
+  each of the next two checks, repeat the command in section 2 with a new `-name` (it is also the
+  subdomain), wait for the tunnel to be `Active`, and do not press Ctrl-C.
 - **Deleting the session** does the same, and the tunnel also has an ownerReference to it.
 - **Order independence.** Apply the tunnel before the session (with `kubectl`, not the client); it
   should wait, not fail.
