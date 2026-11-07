@@ -87,3 +87,12 @@ Expected, in order:
 kubectl -n <ns> delete agentsession smoke --ignore-not-found
 make undeploy        # in each operator repository; the edge one also removes its AgentEdgeTunnels
 ```
+
+## Automated version
+
+`.github/workflows/kind-smoke.yml` runs `hack/kind-smoke.sh` on every pull request: it builds both
+operators from their `main` branches, installs them into a kind cluster and runs the cluster half of
+this checklist with a fake Cloudflare token. It covers the installs, binding, `sessionRef` waiting and
+pinning, termination, RBAC, validation and the client's `Expose` and `Complete`. It does **not** cover
+anything that needs real Cloudflare (tunnel, DNS, Access application, connector, the public URL), so
+section 2 and the leak check above still have to be done by hand with a real zone.
