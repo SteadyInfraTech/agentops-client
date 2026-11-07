@@ -41,10 +41,14 @@ go run ./examples/smoke -namespace <ns> -name smoke -pool <pool> \
   -zone-id <cloudflare zone id> -email you@example.com
 ```
 
+The command blocks and keeps the session open. Leave it running in this terminal and run the checks
+below from a second one. Press Ctrl-C in the first terminal only after they finish: it completes the
+session and starts tunnel teardown.
+
 Expected, in order:
 
 1. The program prints the session UID.
-2. `kubectl -n <ns> get agentsession smoke` reaches `Bound` and has `status.endpoint`.
+2. `kubectl -n <ns> get agentsession smoke -o yaml` reaches `Bound` and has `status.endpoint`.
 3. `kubectl -n <ns> get agentedgetunnel smoke -o yaml` shows `status.sessionUID` and `status.sessionEndpoint`
    recorded, then `phase: Active` and a connector that is ready.
 4. The program prints `https://smoke.<EDGE_BASE_DOMAIN>`. Opening it asks for a Cloudflare Access
