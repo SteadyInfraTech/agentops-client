@@ -1,0 +1,46 @@
+name: kind-smoke
+# Runs agentops-operator, ai-agent-edge-tunnel and this client together on a kind
+# cluster, from the main branches of the two operators. Needs no Cloudflare
+# credentials; see hack/kind-smoke.sh for what is and is not covered.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kind-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agentops-client
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/ai-agent-edge-tunnel
+          path: ai-agent-edge-tunnel
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
+      - name: Smoke test
+        working-directory: agentops-client
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl get agentsessions,agentedgetunnels -A -o yaml || true

@@ -1,0 +1,38 @@
+# A minimal agent pool for the kind smoke test. The image is built from
+# agentops-operator's examples/echo-agent and loaded into kind as echo-agent:ci.
+apiVersion: agents.steadyinfra.com/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: echo-runtime
+spec:
+  framework: custom
+  image: echo-agent:ci
+  imagePullPolicy: IfNotPresent
+  port: 8080
+  probes:
+    livenessPath: /healthz
+    readinessPath: /readyz
+---
+apiVersion: agents.steadyinfra.com/v1alpha1
+kind: AgentService
+metadata:
+  name: echo
+  labels:
+    agents.steadyinfra.com/pool: smoke
+spec:
+  runtimeRef:
+    name: echo-runtime
+  replicas: 1
+  model:
+    provider: openai
+    name: unused
+---
+apiVersion: agents.steadyinfra.com/v1alpha1
+kind: AgentPool
+metadata:
+  name: smoke
+spec:
+  selector:
+    matchLabels:
+      agents.steadyinfra.com/pool: smoke
+  maxSessionsPerReplica: 10
