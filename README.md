@@ -33,7 +33,7 @@ if err != nil {
     if cerr := agentops.Complete(cctx, c, ex); cerr != nil {
         // The session may still be running. Keep ex (SessionUID is needed for a
         // safe retry): log or persist it with both errors.
-        return fmt.Errorf("%w; cleanup of session %s (uid %s) failed: %v", err, ex.SessionName, ex.SessionUID, cerr)
+        return fmt.Errorf("%w; cleanup of session %s (uid %s) failed: %w", err, ex.SessionName, ex.SessionUID, cerr)
     }
     return err
 }
