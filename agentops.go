@@ -112,6 +112,10 @@ func (r ExposeRequest) Validate() error {
 // Cloudflare resources when the session ends. If tunnel creation fails, Expose
 // attempts to delete the session and includes any cleanup error in its return.
 //
+// If creating the session fails with an ambiguous error, such as a lost
+// response, the session may exist but Expose cannot prove it created it, so it
+// does not delete by name. Get the session and check before retrying.
+//
 // The tunnel is not usable yet when Expose returns: call Wait.
 func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure, error) {
 	if err := req.Validate(); err != nil {
@@ -121,7 +125,10 @@ func Expose(ctx context.Context, c client.Client, req ExposeRequest) (*Exposure,
 	session := newObject(SessionGVK, req.Namespace, req.Name)
 	session.Object["spec"] = sessionSpec(req)
 	if err := c.Create(ctx, session); err != nil {
-		return nil, fmt.Errorf("creating AgentSession: %w", err)
+		// If the error is ambiguous (for example a lost response), the session may
+		// exist, and without its UID this call cannot prove it created it, so it
+		// is not deleted here.
+		return nil, fmt.Errorf("creating AgentSession %q (if the error is not AlreadyExists the session may exist; check before retrying): %w", req.Name, err)
 	}
 	if session.GetUID() == "" {
 		return nil, errors.New("the API server returned the AgentSession without a UID")

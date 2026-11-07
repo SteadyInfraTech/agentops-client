@@ -30,7 +30,12 @@ if err != nil {
     // context that survives its cancellation:
     cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
     defer cancel()
-    return errors.Join(err, agentops.Complete(cctx, c, ex))
+    if cerr := agentops.Complete(cctx, c, ex); cerr != nil {
+        // The session may still be running. Keep ex (SessionUID is needed for a
+        // safe retry): log or persist it with both errors.
+        return fmt.Errorf("%w; cleanup of session %s (uid %s) failed: %v", err, ex.SessionName, ex.SessionUID, cerr)
+    }
+    return err
 }
 // ep.URL is https://<hostname>, reachable once the tunnel is Active and its
 // connector is connected.
@@ -41,6 +46,7 @@ err = agentops.Complete(ctx, c, ex)
 
 `Expose` creates the `AgentSession`, then an `AgentEdgeTunnel` with `spec.sessionRef` and an
 `ownerReference` to the session. If tunnel creation fails, `Expose` attempts to delete the session; if that deletion fails, the returned error includes the cleanup error and the session may remain.
+If creating the session itself fails ambiguously (a lost response, say), it may exist; `Expose` does not delete by name because it cannot prove it created it, so check before retrying.
 `Wait` keeps waiting through `Failed` (the edge operator retries) and stops early only on
 `Terminated`. The client `c` is any controller-runtime client with access to both kinds.
 
