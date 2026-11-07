@@ -58,7 +58,7 @@ def main():
         body = call("accounts/%s/cfd_tunnel/%s" % (os.environ["CLOUDFLARE_ACCOUNT_ID"], sys.argv[2]))
         if body.get("success") is True:
             print("deleted" if (body.get("result") or {}).get("deleted_at") else "exists")
-        elif any("not found" in str(e.get("message", "")).lower() for e in body.get("errors", [])):
+        elif body.get("_http") == 404 and any("not found" in str(e.get("message", "")).lower() for e in body.get("errors", [])):
             print("deleted")
         else:
             sys.exit("cloudflare tunnel lookup: %s" % json.dumps(body.get("errors", body))[:300])

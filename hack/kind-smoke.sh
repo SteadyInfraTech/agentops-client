@@ -98,7 +98,7 @@ TUNNEL_ID=""
 live_cleanup() {
   set +e
   kubectl -n "$NS" delete agentsession,agentedgetunnel --all --wait=true --timeout=120s >/dev/null 2>&1
-  local ids
+  local ids state
   ids="$(cf_dns_ids)" || echo "could not list DNS records for $HOST: check Cloudflare by hand" >&2
   for id in $ids; do echo "LEFTOVER dns record $id for $HOST: deleting" >&2; cf_delete "zones/$CLOUDFLARE_ZONE_ID/dns_records/$id"; done
   ids="$(cf_access_ids)" || echo "could not list Access applications for $HOST: check Cloudflare by hand" >&2
