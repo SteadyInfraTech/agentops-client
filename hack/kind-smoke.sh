@@ -88,12 +88,13 @@ ok "CRDs installed"
 step "agent pool"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NS" apply -f "$HERE/hack/kind-smoke/agents.yaml"
-kubectl -n "$NS" rollout status deploy --timeout=180s 2>&1 || true
-end=$((SECONDS + 180))
-until [ "$(kubectl -n "$NS" get pods -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null)" = "true" ]; do
-  [ "$SECONDS" -lt "$end" ] || fail "no ready agent pod"
-  sleep 3
+# The smoke namespace holds only the agent's Deployment, so wait on that rather than on pods.
+end=$((SECONDS + 60))
+until kubectl -n "$NS" get deploy -o name 2>/dev/null | grep -q .; do
+  [ "$SECONDS" -lt "$end" ] || fail "the agent Deployment was never created"
+  sleep 2
 done
+kubectl -n "$NS" wait --for=condition=Available deployment --all --timeout=180s || fail "the agent Deployment never became Available"
 ok "agent pod is ready"
 
 step "RBAC: the edge operator may read sessions, not change them"
@@ -134,7 +135,8 @@ spec:
   cloudflare: {zoneID: zone, subdomain: early}
   security: {allowedEmails: [smoke@example.com]}
 E2
-sleep 15
+wait_field early agentedgetunnel '{.status.message}' 'waiting for AgentSession "early" to exist' 120 || fail "tunnel did not report waiting for the session"
+sleep 10
 [ -z "$(field early agentedgetunnel '{.status.sessionUID}')" ] || fail "tunnel pinned a session that does not exist"
 ok "tunnel waits, nothing pinned"
 
