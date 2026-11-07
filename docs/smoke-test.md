@@ -44,15 +44,18 @@ go run ./examples/smoke -namespace <ns> -name smoke -pool <pool> \
 Expected, in order:
 
 1. The program prints the session UID.
-2. `kubectl get agentsession smoke` reaches `Bound` and has `status.endpoint`.
-3. `kubectl get agentedgetunnel smoke -o yaml` shows `status.sessionUID` and `status.sessionEndpoint`
+2. `kubectl -n <ns> get agentsession smoke` reaches `Bound` and has `status.endpoint`.
+3. `kubectl -n <ns> get agentedgetunnel smoke -o yaml` shows `status.sessionUID` and `status.sessionEndpoint`
    recorded, then `phase: Active` and a connector that is ready.
 4. The program prints `https://smoke.<EDGE_BASE_DOMAIN>`. Opening it asks for a Cloudflare Access
-   login; only the allowed email gets through, then the agent answers.
+   login; only the allowed email gets through. The reference echo agent does not serve `GET /`, so
+   a 404 after login is expected. To see the agent answer, send `POST /v1/chat` with
+   `{"message": "hello"}` as the logged-in user, for example with `fetch` from the browser console
+   on that page.
 
 ## 3. Things worth checking on purpose
 
-- **Ending the session ends the tunnel.** Press Ctrl-C (or `kubectl patch agentsession smoke --type
+- **Ending the session ends the tunnel.** Press Ctrl-C (or `kubectl -n <ns> patch agentsession smoke --type
   merge -p '{"spec":{"completed":true}}'`). Within about 10 seconds plus reconcile time the tunnel
   goes `Terminated`, and the connector Deployment, DNS record, Access application and Cloudflare tunnel
   are gone. Look in the Cloudflare dashboard, not only in the cluster.
@@ -70,6 +73,6 @@ Expected, in order:
 ## 4. Clean up
 
 ```bash
-kubectl delete agentsession smoke --ignore-not-found
+kubectl -n <ns> delete agentsession smoke --ignore-not-found
 make undeploy        # in each operator repository; the edge one also removes its AgentEdgeTunnels
 ```
