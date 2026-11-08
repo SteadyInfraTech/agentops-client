@@ -103,6 +103,12 @@ TUNNEL_ID=""
 # the resource may remain: nothing here can promise otherwise.
 live_cleanup() {
   set +e
+  # Record the tunnel IDs before the objects are deleted, so leftovers can be removed by ID too.
+  local tunnel_ids="$TUNNEL_ID" t id
+  for t in early "$CLIENT_NAME"; do
+    id="$(field "$t" agentedgetunnel '{.status.tunnelID}')"
+    [ -n "$id" ] && tunnel_ids="$tunnel_ids $id"
+  done
   kubectl -n "$NS" delete agentsession,agentedgetunnel --all --wait=true --timeout=120s >/dev/null 2>&1
   local ids state h
   for h in "$HOST" "$EARLY_HOST"; do
@@ -112,10 +118,10 @@ live_cleanup() {
     ids="$(cf_access_ids)" || echo "could not list Access applications for $h: check Cloudflare by hand" >&2
     for id in $ids; do echo "LEFTOVER access application $id for $h: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/$id"; done
   done
-  if [ -n "$TUNNEL_ID" ]; then
-    state="$(cf_tunnel_state "$TUNNEL_ID")" || echo "could not look up tunnel $TUNNEL_ID: check Cloudflare by hand" >&2
-    if [ "$state" = exists ]; then echo "LEFTOVER tunnel $TUNNEL_ID: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID"; fi
-  fi
+  for id in $(printf '%s\n' $tunnel_ids | sort -u); do
+    state="$(cf_tunnel_state "$id")" || echo "could not look up tunnel $id: check Cloudflare by hand" >&2
+    if [ "$state" = exists ]; then echo "LEFTOVER tunnel $id: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$id"; fi
+  done
 }
 [ "$LIVE" = 1 ] && trap live_cleanup EXIT
 
