@@ -37,8 +37,14 @@ if [ "$LIVE" = 1 ]; then
   CONNECTOR_IMAGE="${CONNECTOR_IMAGE:-cloudflare/cloudflared:2024.10.0}"
   CLIENT_NAME="ci-${GITHUB_RUN_ID:-$(date +%s)}"
   HOST="$CLIENT_NAME.$BASE_DOMAIN"
+  EARLY_SUB="early-${GITHUB_RUN_ID:-$(date +%s)}"
+  EARLY_HOST="$EARLY_SUB.$BASE_DOMAIN"
+  ZONE_ID="$CLOUDFLARE_ZONE_ID"
 else
   BASE_DOMAIN=agents.example.test
+  EARLY_SUB=early
+  EARLY_HOST=""
+  ZONE_ID=zone
   CONNECTOR_IMAGE=cloudflare/cloudflared:2024.1.0
 fi
 
@@ -97,16 +103,25 @@ TUNNEL_ID=""
 # the resource may remain: nothing here can promise otherwise.
 live_cleanup() {
   set +e
+  # Record the tunnel IDs before the objects are deleted, so leftovers can be removed by ID too.
+  local tunnel_ids="$TUNNEL_ID" t id
+  for t in early "$CLIENT_NAME"; do
+    id="$(field "$t" agentedgetunnel '{.status.tunnelID}')"
+    [ -n "$id" ] && tunnel_ids="$tunnel_ids $id"
+  done
   kubectl -n "$NS" delete agentsession,agentedgetunnel --all --wait=true --timeout=120s >/dev/null 2>&1
-  local ids state
-  ids="$(cf_dns_ids)" || echo "could not list DNS records for $HOST: check Cloudflare by hand" >&2
-  for id in $ids; do echo "LEFTOVER dns record $id for $HOST: deleting" >&2; cf_delete "zones/$CLOUDFLARE_ZONE_ID/dns_records/$id"; done
-  ids="$(cf_access_ids)" || echo "could not list Access applications for $HOST: check Cloudflare by hand" >&2
-  for id in $ids; do echo "LEFTOVER access application $id for $HOST: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/$id"; done
-  if [ -n "$TUNNEL_ID" ]; then
-    state="$(cf_tunnel_state "$TUNNEL_ID")" || echo "could not look up tunnel $TUNNEL_ID: check Cloudflare by hand" >&2
-    if [ "$state" = exists ]; then echo "LEFTOVER tunnel $TUNNEL_ID: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID"; fi
-  fi
+  local ids state h
+  for h in "$HOST" "$EARLY_HOST"; do
+    export HOST="$h"
+    ids="$(cf_dns_ids)" || echo "could not list DNS records for $h: check Cloudflare by hand" >&2
+    for id in $ids; do echo "LEFTOVER dns record $id for $h: deleting" >&2; cf_delete "zones/$CLOUDFLARE_ZONE_ID/dns_records/$id"; done
+    ids="$(cf_access_ids)" || echo "could not list Access applications for $h: check Cloudflare by hand" >&2
+    for id in $ids; do echo "LEFTOVER access application $id for $h: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps/$id"; done
+  done
+  for id in $(printf '%s\n' $tunnel_ids | sort -u); do
+    state="$(cf_tunnel_state "$id")" || echo "could not look up tunnel $id: check Cloudflare by hand" >&2
+    if [ "$state" = exists ]; then echo "LEFTOVER tunnel $id: deleting" >&2; cf_delete "accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$id"; fi
+  done
 }
 [ "$LIVE" = 1 ] && trap live_cleanup EXIT
 
@@ -186,13 +201,15 @@ kubectl -n "$NS" delete agentedgetunnel nosecurity --wait=true
 ok "tunnel without allowedEmails or allowPublic is refused before anything is created"
 
 step "sessionRef waits for a session that does not exist yet"
-kubectl -n "$NS" apply -f - <<'E2'
+# In LIVE mode this tunnel is provisioned for real once its session is Bound, so it needs the real
+# zone and a subdomain of its own; it is removed again by the completion step below.
+kubectl -n "$NS" apply -f - <<E2
 apiVersion: edge.steadyinfra.com/v1alpha1
 kind: AgentEdgeTunnel
 metadata: {name: early}
 spec:
   sessionRef: {name: early}
-  cloudflare: {zoneID: zone, subdomain: early}
+  cloudflare: {zoneID: "$ZONE_ID", subdomain: "$EARLY_SUB"}
   security: {allowedEmails: [smoke@example.com]}
 E2
 wait_field early agentedgetunnel '{.status.message}' 'waiting for AgentSession "early" to exist' 120 || fail "tunnel did not report waiting for the session"
